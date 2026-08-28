@@ -198,9 +198,14 @@ async function runScanner() {
     ? args.filter((a, i) => i !== batchArgIndex && i !== batchArgIndex + 1 && !a.startsWith('-'))[0]
     : args.filter(a => !a.startsWith('-'))[0];
 
-  const targets = inputFile
-    ? fs.readFileSync(inputFile, 'utf8').split(/\r?\n/).map(t => t.trim()).filter(Boolean)
-    : ['slack.com', 'shopify.com', 'wikipedia.org'];
+  let targets;
+  if (!inputFile) {
+    targets = ['slack.com', 'shopify.com', 'wikipedia.org'];
+  } else if (inputFile.includes('.') && !inputFile.includes('/') && !inputFile.includes('\\')) {
+    targets = [inputFile];
+  } else {
+    targets = fs.readFileSync(inputFile, 'utf8').split(/\r?\n/).map(t => t.trim()).filter(Boolean);
+  }
 
   console.log(`Starting Stripe Qualification scan for ${targets.length} targets (batch: ${concurrency})...\n`);
 
