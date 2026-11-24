@@ -17,26 +17,46 @@ async function getBrowser() {
 // Subdomains where B2B startups typically host their product, billing or auth
 const SUBDOMAINS = ['www', 'app', 'dashboard', 'portal', 'billing', 'account', 'my', 'admin', 'login', 'checkout', 'pay', 'console', 'panel', 'secure', 'members', 'client', 'platform', 'store', 'shop'];
 
-// Everything that proves Stripe runs on a page, from strongest to weakest
+// Strong signals only: each one means a live Stripe integration, not just a mention of Stripe
 const STRIPE_HTML_PATTERNS = [
-  'pk_live_', 'pk_test_',                       // Stripe publishable API keys
+  'pk_live_',                                   // Stripe live publishable API key
   'stripe.elements', 'stripejs',                // Stripe Elements / JS SDK
   'stripeenvironment',                          // API params like ?stripeEnvironment=...
   'js.stripe.com', 'checkout.stripe.com',       // Checkout / Elements hosts
   'buy.stripe.com', 'pay.stripe.com',           // Stripe Payment Links / hosted payment pages
-  'stripe-verification',                        // Stripe custom domain verification
-  'stripe.com',                                 // Generic link/reference
-  'stripe('                                     // window.Stripe() init calls
+  'billing.stripe.com', 'invoice.stripe.com',   // Customer portal / hosted invoices
+  'stripe-verification'                         // Stripe custom domain verification
 ];
+
+// Hosts Stripe serves its SDK, API and fraud checks from
+const STRIPE_HOST = /(^|\.)stripe\.(com|network)$/;
 
 function hasStripeInHtml(html) {
   const lower = (html || '').toLowerCase();
   return STRIPE_HTML_PATTERNS.some(pattern => lower.includes(pattern));
 }
 
+// Stripe.js sets __stripe_mid and __stripe_sid; other names containing "stripe" are not proof
 function hasStripeCookie(cookieString) {
-  const lower = (cookieString || '').toLowerCase();
-  return lower.includes('__stripe') || lower.includes('stripe');
+  return (cookieString || '').toLowerCase().includes('__stripe_');
+}
+
+// A CSP counts only when it allows a Stripe host, not when "stripe" appears elsewhere in it
+function cspAllowsStripe(csp) {
+  return /\bstripe\.(com|network)\b/i.test(csp || '');
+}
+
+// Stripe object IDs (price_1..., prod_..., cus_..., sub_..., in_...) in a site's own API responses
+const STRIPE_OBJECT_ID = /"(price_1[A-Za-z0-9]{20,}|prod_[A-Za-z0-9]{14}|(cus|sub|in)_[A-Za-z0-9]{14,})"/;
+
+// A call to Stripe's own hosts, or to the site's API with Stripe parameters (?stripeEnvironment=...)
+function isStripeRequest(url) {
+  try {
+    const parsed = new URL(url);
+    return STRIPE_HOST.test(parsed.hostname.toLowerCase()) || parsed.search.toLowerCase().includes('stripeenvironment');
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -68,8 +88,7 @@ async function checkUrlWaterfall(url) {
     }
 
     // STEP 3: Content Security Policy header whitelisting Stripe
-    const csp = headers['content-security-policy'] || '';
-    if (csp.toLowerCase().includes('stripe')) {
+    if (cspAllowsStripe(headers['content-security-policy'])) {
       return { found: true, method: 'Stripe Whitelisted in CSP Headers' };
     }
 
@@ -92,14 +111,31 @@ async function checkUrlWithBrowser(url) {
     let stripeHit = false;
 
     page.on('request', req => {
-      if (req.url().toLowerCase().includes('stripe')) stripeHit = true;
+      if (isStripeRequest(req.url())) stripeHit = true;
     });
 
-    const response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+    // Catches apps that call Stripe from their backend and pass its IDs to the page
+    let stripeIdHit = false;
+    page.on('response', async res => {
+      if (stripeIdHit || !(res.headers()['content-type'] || '').includes('json')) return;
+      try {
+        if (STRIPE_OBJECT_ID.test(await res.text())) stripeIdHit = true;
+      } catch {
+        // Body unavailable (redirect, aborted or closed page)
+      }
+    });
+
+    // A slow page that never goes quiet still counts: keep the requests seen before the timeout
+    let response = null;
+    try {
+      response = await page.goto(url, { waitUntil: 'networkidle2', timeout: 15000 });
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error;
+    }
 
     // CSP from the final (post-redirect) response
     const csp = (response && response.headers()['content-security-policy']) || '';
-    if (csp.toLowerCase().includes('stripe')) {
+    if (cspAllowsStripe(csp)) {
       await page.close();
       return { found: true, method: 'Stripe Whitelisted in CSP Headers (browser)' };
     }
@@ -116,6 +152,9 @@ async function checkUrlWithBrowser(url) {
     }
     if (stripeHit) {
       return { found: true, method: 'Stripe Network Request Detected (via browser JS)' };
+    }
+    if (stripeIdHit) {
+      return { found: true, method: 'Stripe Object IDs in API Response (via browser JS)' };
     }
     if (hasStripeInHtml(html)) {
       return { found: true, method: 'Stripe References in Rendered HTML (via browser JS)' };
@@ -135,7 +174,7 @@ async function checkUrlWithBrowser(url) {
 async function checkDnsStripeTxt(domain) {
   try {
     const records = await dns.resolveTxt(domain);
-    return records.some(parts => parts.join('').toLowerCase().includes('stripe'));
+    return records.some(parts => parts.join('').toLowerCase().startsWith('stripe-verification='));
   } catch (error) {
     return false;
   }

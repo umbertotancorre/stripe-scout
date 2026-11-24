@@ -10,6 +10,8 @@ The scanner runs in 3 phases:
 2. **HTTP checks**: scans apex + 19 common subdomains for Stripe cookies, HTML patterns (API keys, SDK refs, payment links), and CSP headers
 3. **Browser checks**: uses Puppeteer to execute JS and watch for Stripe network requests
 
+Only strong signals count: a live publishable key, Stripe's SDK or hosted pages, `__stripe_` cookies, requests to Stripe's own hosts, Stripe product or price IDs in the site's own API responses, or a `stripe-verification=` record. A plain link to stripe.com or a Stripe logo on a page is not proof of an integration.
+
 ## Install
 
 ```bash
